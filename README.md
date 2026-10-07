@@ -65,6 +65,27 @@ end
 
 See [SECURITY](./SECURITY.md)
 
+## Unpacking Archives with Hard Links
+
+Tar archives may contain hard link entries that refer to a target appearing later
+in the archive, possibly through a chain of other hard link entries. Because this
+cannot be handled in read order, minitar offers an explicit deferred hard link
+extraction mode:
+
+```ruby
+Minitar.unpack('backup.tar', 'x', [], hardlinks: true)
+```
+
+In this mode, hard link entries are recorded as they are encountered and the links
+are created once their target entry has been produced by the current extraction.
+Links are only created between extracted entries (never to pre-existing files or
+through symbolic links escaping the destination, and never to directories). When
+the archive contains duplicate paths, links that were already established keep
+pointing at the inode of the version that was current when they were resolved.
+After extraction, any links that cannot be resolved -- missing targets or circular
+chains -- are reported with `Minitar::HardLinkError`; entries that were already
+extracted are left in place.
+
 ## minitar Semantic Versioning
 
 The minitar library uses a [Semantic Versioning][semver] scheme with one change:

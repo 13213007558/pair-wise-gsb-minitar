@@ -67,6 +67,9 @@ class Minitar
   SecureRelativePathError = Class.new(Error)
   # The exception raised when a file contains an invalid Posix header.
   InvalidTarStream = Class.new(Error)
+  # The exception raised when one or more hard link entries cannot be resolved during
+  # deferred hard link extraction. See Minitar::HardLinkResolver.
+  HardLinkError = Class.new(Error)
 end
 
 class << Minitar
@@ -259,6 +262,14 @@ class << Minitar
   # `dest`.
   #
   # If `files` is not empty, it will act as a full name filter to restrict extraction.
+  #
+  # When `options[:hardlinks]` is true, hard link entries are extracted with
+  # Minitar::HardLinkResolver: links are recorded as they are encountered and created
+  # once their target entry becomes available, so targets may appear later in the
+  # archive than the links referring to them. Unresolvable links (missing targets,
+  # non-file targets, or circular chains) are reported with Minitar::HardLinkError
+  # after all other entries have been extracted. The default (false) extracts hard
+  # link entries as empty files.
   def unpack(src, dest, files = [], options = {}, &block)
     Minitar::Input.open(src) do |inp|
       if File.exist?(dest) && !dir?(dest)
@@ -267,9 +278,21 @@ class << Minitar
 
       FileUtils.mkdir_p(dest) unless File.exist?(dest)
 
-      inp.each do |entry|
-        if files.empty? || files.include?(entry.full_name)
-          inp.extract_entry(dest, entry, options, &block)
+      if options[:hardlinks]
+        resolver = Minitar::HardLinkResolver.new(dest, options)
+
+        inp.each do |entry|
+          if files.empty? || files.include?(entry.full_name)
+            resolver.extract_entry(inp, entry, &block)
+          end
+        end
+
+        resolver.finish
+      else
+        inp.each do |entry|
+          if files.empty? || files.include?(entry.full_name)
+            inp.extract_entry(dest, entry, options, &block)
+          end
         end
       end
     end
@@ -293,6 +316,7 @@ end
 require "minitar/posix_header"
 require "minitar/pax_header"
 require "minitar/input"
+require "minitar/hard_link_resolver"
 require "minitar/output"
 require "minitar/reader"
 require "minitar/writer"
