@@ -24,7 +24,9 @@ class Minitar::Reader
       attr_reader field.to_sym
     end
 
-    def initialize(header, io)
+    attr_reader :pax_attributes
+
+    def initialize(header, io, pax_attributes = nil)
       @io = io
       @name = header.name
       @mode = header.mode
@@ -42,6 +44,7 @@ class Minitar::Reader
       @devmajor = header.devmajor
       @devminor = header.devminor
       @prefix = header.prefix
+      @pax_attributes = pax_attributes || {}
       @read = 0
       @orig_pos =
         if Minitar.seekable?(@io)
@@ -213,54 +216,82 @@ class Minitar::Reader
   def each_entry
     return to_enum unless block_given?
 
+    global_pax_attributes = {}
+    pending_pax_attributes = nil
+    pending_long_name = nil
+    header = nil
+
     loop do
       return if @io.eof?
 
-      header = Minitar::PosixHeader.from_stream(@io)
-      raise Minitar::InvalidTarStream unless header.valid?
-      return if header.empty?
+      unless header
+        header = Minitar::PosixHeader.from_stream(@io)
+        raise Minitar::InvalidTarStream unless header.valid?
+        return if header.empty?
 
-      raise Minitar::InvalidTarStream if header.size < 0
+        raise Minitar::InvalidTarStream if header.size < 0
+      end
 
       if header.long_name?
         name_block = (header.size / 512.0).ceil * 512
 
-        long_name = @io.read(name_block).rstrip
-        header = Minitar::PosixHeader.from_stream(@io)
-
-        return if header.empty?
-        header.long_name = long_name
-      elsif header.pax_header?
+        long_name = @io.read(name_block)
+        if long_name.nil? || long_name.bytesize < name_block
+          raise Minitar::UnexpectedEOF, "Truncated GNU long name"
+        end
+        pending_long_name = long_name.sub(/\0+\z/, "")
+        header = nil
+      elsif header.pax_header? || header.pax_global_header?
         pax_header = Minitar::PaxHeader.from_stream(@io, header)
 
-        header = Minitar::PosixHeader.from_stream(@io)
-        return if header.empty?
-
-        header.size = pax_header.size if pax_header.size
-      end
-
-      entry = EntryStream.new(header, @io)
-      size = entry.size
-
-      yield entry
-
-      skip = (512 - (size % 512)) % 512
-
-      if Minitar.seekable?(@io, :seek)
-        # avoid reading...
-        try_seek(size - entry.bytes_read)
-      else
-        pending = size - entry.bytes_read
-        while pending > 0
-          bread = @io.read([pending, 4096].min).bytesize
-          raise Minitar::UnexpectedEOF if @io.eof?
-          pending -= bread
+        if header.pax_global_header?
+          global_pax_attributes = merge_pax_attributes(
+            global_pax_attributes, pax_header.attributes
+          )
+        else
+          pending_pax_attributes ||= {}
+          pax_header.attributes.each do |keyword, value|
+            pending_pax_attributes[keyword] = value.empty? ? nil : value
+          end
         end
-      end
 
-      @io.read(skip) # discard trailing zeros
-      # make sure nobody can use #read, #getc or #rewind anymore
-      entry.close
+        header = nil
+      else
+        if pending_long_name
+          header.long_name = pending_long_name
+          pending_long_name = nil
+        end
+
+        effective_pax_attributes = merge_pax_attributes(
+          global_pax_attributes, pending_pax_attributes || {}
+        )
+        Minitar::PaxHeader.apply_to(header, effective_pax_attributes)
+        pending_pax_attributes = nil
+
+        entry = EntryStream.new(header, @io, effective_pax_attributes)
+        size = entry.size
+
+        yield entry
+
+        skip = (512 - (size % 512)) % 512
+
+        if Minitar.seekable?(@io, :seek)
+          # avoid reading...
+          try_seek(size - entry.bytes_read)
+        else
+          pending = size - entry.bytes_read
+          while pending > 0
+            bread = @io.read([pending, 4096].min).bytesize
+            raise Minitar::UnexpectedEOF if @io.eof?
+            pending -= bread
+          end
+        end
+
+        @io.read(skip) # discard trailing zeros
+        # make sure nobody can use #read, #getc or #rewind anymore
+        entry.close
+        header = nil
+      end
     end
   end
   alias_method :each, :each_entry
@@ -284,5 +315,19 @@ class Minitar::Reader
       @io.seek(to_skip, IO::SEEK_CUR)
       skipped += to_skip
     end
+  end
+
+  def merge_pax_attributes(global_attributes, local_attributes)
+    merged = global_attributes.dup
+
+    local_attributes.each do |keyword, value|
+      if value.nil? || value.empty?
+        merged.delete(keyword)
+      else
+        merged[keyword] = value
+      end
+    end
+
+    merged
   end
 end

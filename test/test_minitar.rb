@@ -71,7 +71,10 @@ class TestMinitar < Minitest::Test
 
     writer = StringIO.new
     Minitar.open(writer, "w") do |stream|
-      SCENARIO.each_pair do |name, data|
+      write_scenario = SCENARIO.merge(
+        "notime" => {mtime: Rational("1072915200.5"), data: "notime"}
+      )
+      write_scenario.each_pair do |name, data|
         name, data =
           if data.is_a?(Hash)
             name = data.merge(name: name)
@@ -92,7 +95,7 @@ class TestMinitar < Minitest::Test
       end
     end
 
-    assert_equal 5120, writer.string.length
+    assert_equal 9216, writer.string.length
 
     events.each do |event|
       if event[:name].is_a?(Hash)

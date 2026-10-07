@@ -55,6 +55,20 @@ class Minitar::PosixHeader
   end
 
   attr_writer :size
+  attr_writer :uid, :gid, :uname, :gname, :prefix
+
+  def linkname=(value)
+    @linkname = value.to_s
+  end
+
+  def mtime=(value)
+    @mtime = value
+  end
+
+  def path=(value)
+    @prefix = ""
+    @name = value
+  end
 
   # The pack format passed to Array#pack for encoding a header.
   HEADER_PACK_FORMAT = "a100a8a8a8a12a12a7aaa100a6a2a32a32a8a8a155"
@@ -139,7 +153,7 @@ class Minitar::PosixHeader
       raise ArgumentError, "Field #{f} is required." unless v.key?(f)
     end
 
-    v[:mtime] = v[:mtime].to_i
+    v[:mtime] = v[:mtime].nil? ? 0 : v[:mtime].to_r.to_i
     v[:checksum] ||= ""
     v[:typeflag] ||= "0"
     v[:magic] ||= MAGIC_BYTES
@@ -168,6 +182,10 @@ class Minitar::PosixHeader
   # metadata for the next file entry.
   def pax_header? = typeflag == "x"
 
+  # Returns `true` if the header is a PAX global extended header which contains
+  # metadata that applies to following file entries.
+  def pax_global_header? = typeflag == "g"
+
   # Sets the `name` to the `value` provided and clears `prefix`.
   #
   # Used by Minitar::Reader#each_entry to set the long name when processing GNU long
@@ -176,9 +194,7 @@ class Minitar::PosixHeader
   # The `value` must be the complete name, including leading directory components.
   def long_name=(value)
     valid_name!(value)
-
-    @prefix = ""
-    @name = value
+    self.path = value
   end
 
   # A string representation of the header.

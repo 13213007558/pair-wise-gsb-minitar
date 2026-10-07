@@ -67,6 +67,11 @@ module Minitar::TestHelpers::Header
       update_header_checksum(_1)
     }
 
+  def build_tar_pax_global_header(name, prefix, content_size) =
+    build_header("g", name, prefix, content_size, 0o644).then {
+      update_header_checksum(_1)
+    }
+
   def update_header_checksum(header) =
     header.tap { |h|
       checksum = __fields["checksum"]
