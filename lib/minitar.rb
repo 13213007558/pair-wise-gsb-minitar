@@ -114,7 +114,7 @@ class << Minitar
     stats = {
       gid: nil,
       uid: nil,
-      mtime: Time.now,
+      mtime: Time.now.to_i,
       size: data&.size || 0,
       mode: data ? 0o644 : 0o755
     }

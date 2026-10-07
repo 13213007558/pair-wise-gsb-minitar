@@ -24,24 +24,30 @@ class Minitar::Reader
       attr_reader field.to_sym
     end
 
-    def initialize(header, io)
+    attr_reader :pax_attributes
+
+    def initialize(header, io, pax_header = nil)
       @io = io
-      @name = header.name
+      attributes = pax_header&.attributes || {}
+      override = attributes.reject { |_, value| value.empty? }
+
+      @name = override.key?("path") ? pax_header.path : header.name
       @mode = header.mode
-      @uid = header.uid
-      @gid = header.gid
-      @size = header.size
-      @mtime = header.mtime
+      @uid = override.key?("uid") ? pax_header.uid : header.uid
+      @gid = override.key?("gid") ? pax_header.gid : header.gid
+      @size = override.key?("size") ? pax_header.size : header.size
+      @mtime = override.key?("mtime") ? pax_header.mtime : header.mtime
       @checksum = header.checksum
       @typeflag = header.typeflag
-      @linkname = header.linkname
+      @linkname = override.key?("linkpath") ? pax_header.linkpath : header.linkname
       @magic = header.magic
       @version = header.version
-      @uname = header.uname
-      @gname = header.gname
+      @uname = override.key?("uname") ? pax_header.uname : header.uname
+      @gname = override.key?("gname") ? pax_header.gname : header.gname
       @devmajor = header.devmajor
       @devminor = header.devminor
-      @prefix = header.prefix
+      @prefix = override.key?("path") ? "" : header.prefix
+      @pax_attributes = override.dup.freeze
       @read = 0
       @orig_pos =
         if Minitar.seekable?(@io)
@@ -194,12 +200,17 @@ class Minitar::Reader
     rescue
       nil
     end
+    @global_pax_attributes = {}
+    @local_pax_attributes = {}
   end
 
   # Resets the read pointer to the beginning of data stream. Do not call this during
   # a #each or #each_entry iteration. This only works with random access data streams that
   # respond to #rewind and #pos.
   def rewind
+    @global_pax_attributes = {}
+    @local_pax_attributes = {}
+
     if @init_pos.zero?
       raise Minitar::NonSeekableStream unless Minitar.seekable?(@io, :rewind)
       @io.rewind
@@ -222,24 +233,32 @@ class Minitar::Reader
 
       raise Minitar::InvalidTarStream if header.size < 0
 
-      if header.long_name?
-        name_block = (header.size / 512.0).ceil * 512
+      loop do
+        if header.long_name?
+          name_block = ((header.size + 511) / 512) * 512
 
-        long_name = @io.read(name_block).rstrip
-        header = Minitar::PosixHeader.from_stream(@io)
+          long_name = @io.read(name_block).rstrip
+          header = Minitar::PosixHeader.from_stream(@io)
 
-        return if header.empty?
-        header.long_name = long_name
-      elsif header.pax_header?
-        pax_header = Minitar::PaxHeader.from_stream(@io, header)
+          return if header.empty?
+          header.long_name = long_name
+        elsif header.pax_header?
+          pax_header = Minitar::PaxHeader.from_stream(@io, header)
 
-        header = Minitar::PosixHeader.from_stream(@io)
-        return if header.empty?
+          target = header.pax_global_header? ? @global_pax_attributes : @local_pax_attributes
+          apply_pax_attributes(target, pax_header.attributes)
 
-        header.size = pax_header.size if pax_header.size
+          header = Minitar::PosixHeader.from_stream(@io)
+          return if header.empty?
+        else
+          break
+        end
       end
 
-      entry = EntryStream.new(header, @io)
+      effective_attributes = @global_pax_attributes.merge(@local_pax_attributes)
+      pax_header = effective_attributes.empty? ? nil : Minitar::PaxHeader.new(effective_attributes)
+      entry = EntryStream.new(header, @io, pax_header)
+      @local_pax_attributes = {}
       size = entry.size
 
       yield entry
@@ -283,6 +302,16 @@ class Minitar::Reader
       to_skip = [bytes - skipped, max].min
       @io.seek(to_skip, IO::SEEK_CUR)
       skipped += to_skip
+    end
+  end
+
+  def apply_pax_attributes(target, attributes)
+    attributes.each do |keyword, value|
+      if value.empty?
+        target.delete(keyword)
+      else
+        target[keyword] = value
+      end
     end
   end
 end

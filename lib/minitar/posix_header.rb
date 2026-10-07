@@ -164,9 +164,14 @@ class Minitar::PosixHeader
   # that the next block of data is the filename.
   def long_name? = typeflag == "L" && name == GNU_EXT_LONG_LINK
 
-  # Returns `true` if the header is a PAX extended header which contains
-  # metadata for the next file entry.
-  def pax_header? = typeflag == "x"
+  # Returns `true` if the header is a per-entry PAX extended header.
+  def pax_extended_header? = typeflag == "x"
+
+  # Returns `true` if the header is a global PAX extended header.
+  def pax_global_header? = typeflag == "g"
+
+  # Returns `true` if the header is either kind of PAX extended header.
+  def pax_header? = pax_extended_header? || pax_global_header?
 
   # Sets the `name` to the `value` provided and clears `prefix`.
   #

@@ -7,6 +7,7 @@ class TestPaxHeader < Minitest::Test
 
     assert_equal 8614356715, pax_header.size
     assert_equal "1749098832.3200000", pax_header.attributes["mtime"]
+    assert_instance_of Rational, pax_header.mtime
   end
 
   def test_from_stream_without_size_attribute
@@ -15,7 +16,7 @@ class TestPaxHeader < Minitest::Test
 
     assert_nil pax_header.size
     assert_equal "some/long/path.txt", pax_header.path
-    assert_equal 1749098832.32, pax_header.mtime
+    assert_equal Rational("1749098832.3200000"), pax_header.mtime
   end
 
   def test_parse_multiline_values
@@ -44,7 +45,7 @@ class TestPaxHeader < Minitest::Test
 
     assert_equal 8614356715, pax_header.size
     assert_equal "some/long/path.txt", pax_header.path
-    assert_equal 1749098832.32, pax_header.mtime
+    assert_equal Rational("1749098832.3200000"), pax_header.mtime
 
     # Check raw attributes
     assert_equal "8614356715", pax_header.attributes["size"]
@@ -55,6 +56,30 @@ class TestPaxHeader < Minitest::Test
   def test_parse_content_with_invalid_length_format
     assert_raises(ArgumentError) do
       Minitar::PaxHeader.from_data("19 size=8614356715\ninvalid line\n23 path=valid/path.txt\n")
+    end
+  end
+
+  def test_parse_content_with_zero_length
+    assert_raises(ArgumentError) do
+      Minitar::PaxHeader.from_data("0 key=value\n")
+    end
+  end
+
+  def test_parse_content_with_missing_newline
+    assert_raises(ArgumentError) do
+      Minitar::PaxHeader.from_data("16 size=12345678")
+    end
+  end
+
+  def test_parse_content_with_truncated_record
+    assert_raises(ArgumentError) do
+      Minitar::PaxHeader.from_data("30 size=12345678\n")
+    end
+  end
+
+  def test_parse_content_with_missing_equal_sign
+    assert_raises(ArgumentError) do
+      Minitar::PaxHeader.from_data("14 size12345678\n")
     end
   end
 
@@ -89,6 +114,23 @@ class TestPaxHeader < Minitest::Test
   def test_pax_header_to_s
     pax_header = Minitar::PaxHeader.new(size: "8614356715", mtime: "1749098832.3200000")
     assert_equal "19 size=8614356715\n28 mtime=1749098832.3200000\n", pax_header.to_s
+  end
+
+  def test_to_s_preserves_utf8_byte_length_and_unknown_keys
+    value = "é☃"
+    pax_header = Minitar::PaxHeader.new("unknown" => value)
+    record = pax_header.to_s
+
+    assert_equal "17 unknown=#{value}\n".b, record
+    assert_equal 17, record.bytesize
+    assert_equal Minitar::PaxHeader.from_data(record).attributes["unknown"], value.b
+  end
+
+  def test_to_s_empty_value_can_clear_metadata
+    pax_header = Minitar::PaxHeader.new("path" => "")
+
+    assert_equal "8 path=\n", pax_header.to_s
+    assert_equal "", Minitar::PaxHeader.from_data("8 path=\n").attributes["path"]
   end
 
   private

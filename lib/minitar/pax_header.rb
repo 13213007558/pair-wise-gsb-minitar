@@ -1,111 +1,140 @@
 # frozen_string_literal: true
 
-# Implements the PAX Extended Header as a Ruby class. The header consists of following
-# format:
-#
-# ```
-# <decimal-length><space><ascii-keyword>=<value><newline>
-# ```
-#
-# Where:
-#
-# - `decimal-length`: the total number of bytes for the PaxHeader record using ASCII
-#   decimal values; this includes the terminal newline (0x10).
-# - `space` is a single literal ASCII space (0x20).
-# - `ascii-keyword` is a PAX Extended Header keyword, which may be any ASCII character
-#   except newline (0x10) or equal sign (0x3D).
-# - `=` is the literal ASCII equal sign (0x3D).
-# - `value` is any series of bytes except newline (0x10).
-# - `newline` is the literal ASCII newline (0x10).
-#
-# There are several keywords defined in the POSIX standard; some of them are supported in
-# this class, but may not be supported by Minitar as a whole.
-#
-# Primary support for PAX extended headers is for extracting size information for large
-# file support. Other features may be added in the future.
+# Implements PAX global (+g+) and per-entry (+x+) extended headers.
 class Minitar::PaxHeader
   BLOCK_SIZE = 512
 
   attr_reader :attributes
 
   class << self
-    # Creates a new PaxHeader from a data stream and posix header. Reads the PAX content
-    # based on the size specified in the posix header.
     def from_stream(stream, posix_header)
-      raise ArgumentError, "Header must be a PAX header" unless posix_header.pax_header?
+      unless posix_header.pax_header?
+        raise ArgumentError, "Header must be a PAX header"
+      end
 
-      pax_block = (posix_header.size / BLOCK_SIZE.to_f).ceil * BLOCK_SIZE
+      raise ArgumentError, "PAX header size must be positive" if posix_header.size <= 0
+
+      pax_block = ((posix_header.size + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE
       pax_content = stream.read(pax_block)
 
-      raise Minitar::InvalidTarStream if pax_content.nil? || pax_content.bytesize < posix_header.size
+      if pax_content.nil? || pax_content.bytesize < posix_header.size
+        raise Minitar::InvalidTarStream
+      end
 
-      actual_content = pax_content[0, posix_header.size]
-
-      from_data(actual_content)
+      from_data(pax_content.byteslice(0, posix_header.size))
     end
 
-    # Creates a new PaxHeader from PAX content data.
     def from_data(content) = new(parse_content(content))
+
+    def valid_keyword!(keyword)
+      return if keyword.bytesize.positive? &&
+        keyword.ascii_only? &&
+        !keyword.include?(" ") &&
+        !keyword.include?("=") &&
+        !keyword.include?("\n")
+
+      raise ArgumentError, "Invalid keyword in PAX header: #{keyword.inspect}"
+    end
 
     private
 
     def parse_content(content)
+      content = content.to_s.b
       attributes = {}
       offset = 0
 
       while offset < content.bytesize
-        space_pos = content.index(" ", offset)
-        break unless space_pos
+        remaining = content.byteslice(offset, content.bytesize - offset)
+        relative_space = remaining.index(" ")
+        raise ArgumentError, "Missing length separator in PAX header" unless relative_space
 
-        length_str = content[offset, space_pos - offset]
-
+        length_str = content.byteslice(offset, relative_space)
         unless length_str.match?(/\A\d+\z/)
-          raise ArgumentError, "Invalid length format in PAX header: '#{length_str}'"
+          raise ArgumentError, "Invalid length format in PAX header: #{length_str.inspect}"
         end
 
-        length = length_str.to_i
-        if offset + length > content.bytesize
-          raise ArgumentError, "Length beyond PAX header: '#{content[offset..]}'"
+        length = Integer(length_str, 10)
+        if length <= 0 || offset + length > content.bytesize
+          raise ArgumentError, "Length beyond PAX header: #{length_str}"
         end
-        record = content[offset, length]
 
-        keyword_value = record[(space_pos - offset + 1)..-2]
-        if keyword_value.include?("=")
-          keyword, value = keyword_value.split("=", 2)
-          attributes[keyword] = value
-        end
+        record = content.byteslice(offset, length)
+        raise ArgumentError, "Missing newline in PAX header" unless record.end_with?("\n")
+
+        keyword_value = record.byteslice(relative_space + 1, length - relative_space - 2)
+        equal_pos = keyword_value.index("=")
+        raise ArgumentError, "Missing keyword separator in PAX header" unless equal_pos
+
+        keyword = keyword_value.byteslice(0, equal_pos)
+        valid_keyword!(keyword)
+        value = keyword_value.byteslice(equal_pos + 1, keyword_value.bytesize - equal_pos - 1)
+        attributes[keyword] = value
 
         offset += length
       end
+
+      raise ArgumentError, "Truncated record in PAX header" if offset != content.bytesize
       attributes
     end
   end
 
-  # Creates a new PaxHeader from attributes hash.
   def initialize(attributes = {})
-    @attributes = attributes.transform_keys(&:to_s)
+    @attributes = attributes.transform_keys(&:to_s).transform_values(&:to_s)
   end
 
-  # The size value from PAX attributes
-  def size = @attributes["size"]&.to_i
-
-  # The path value from PAX attributes
+  def size = integer_attribute("size")
   def path = @attributes["path"]
+  def linkpath = @attributes["linkpath"]
+  def uid = integer_attribute("uid")
+  def gid = integer_attribute("gid")
+  def uname = @attributes["uname"]
+  def gname = @attributes["gname"]
 
-  # The mtime value from PAX attributes
-  def mtime = @attributes["mtime"]&.to_f
+  # Returns decimal times as Rational so no precision is lost to Float.
+  def mtime = decimal_attribute("mtime")
+  def atime = decimal_attribute("atime")
+  def ctime = decimal_attribute("ctime")
 
-  # Returns a string representation of the PAX header content.
   def to_s
     @attributes.map do |keyword, value|
-      keyword_value = " #{keyword}=#{value}\n"
-      record = keyword_value
-      begin
-        length = record.bytesize
-        length_str = length.to_s
-        record = "#{length_str}#{keyword_value}"
-      end while record.size != length # standard:disable Lint/Loop
+      keyword = keyword.to_s
+      self.class.valid_keyword!(keyword)
+
+      suffix = " #{keyword}=#{value}\n".b
+      total = suffix.bytesize + 1
+
+      loop do
+        candidate = suffix.bytesize + total.to_s.bytesize
+        raise ArgumentError, "Unable to encode PAX header length" if candidate < total
+        break if candidate == total
+        total = candidate
+      end
+
+      record = "#{total}#{suffix}"
+      if record.bytesize != total
+        raise ArgumentError, "Invalid PAX header record length"
+      end
       record
     end.join
+  end
+
+  private
+
+  def integer_attribute(name)
+    value = @attributes[name]
+    return if value.nil?
+    unless value.match?(/\A\d+\z/)
+      raise ArgumentError, "Invalid decimal integer in PAX #{name}: #{value.inspect}"
+    end
+    Integer(value, 10)
+  end
+
+  def decimal_attribute(name)
+    value = @attributes[name]
+    return if value.nil?
+    unless value.match?(/\A-?\d+(?:\.\d+)?\z/)
+      raise ArgumentError, "Invalid decimal time in PAX #{name}: #{value.inspect}"
+    end
+    Rational(value)
   end
 end
