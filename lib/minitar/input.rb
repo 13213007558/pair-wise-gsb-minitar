@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "input/hard_link_extractor"
+
 # This wraps a Minitar::Reader with convenience methods and wrapped stream management;
 # Input only works with data streams that can be rewound.
 #
@@ -90,6 +92,7 @@ class Minitar::Input
     raise Minitar::NonSeekableStream unless Minitar.seekable?(@io, :rewind)
 
     @tar = Minitar::Reader.new(@io)
+    @hard_link_extractors = {}
   end
 
   # When provided a block, iterates through each entry in the archive. When finished,
@@ -114,6 +117,7 @@ class Minitar::Input
   # The `action` will be one of:
   #
   # - `:dir`: The `entry` is a directory.
+  # - `:hard_link`: A hard link has been created.
   # - `:file_start`: The `entry` is a file; the extract of the file is just beginning.
   # - `:file_progress`: Yielded every 4096 bytes during the extract of the `entry`.
   # - `:file_done`: Yielded when the `entry` is completed.
@@ -123,6 +127,11 @@ class Minitar::Input
   # - `:current`: The current total number of bytes read in the `entry`.
   # - `:currinc`: The current number of bytes read in this read cycle.
   # - `:entry`: The entry being extracted; this is a Minitar::Reader::EntryStream.
+  #
+  # Pass `hardlinks: true` in `options` to create hard-link entries. Links may appear
+  # before their targets in the archive; Minitar.unpack resolves those dependencies
+  # after all entries have been read. When using #extract_entry directly, call
+  # #finish_extraction after processing the archive.
   def extract_entry(destdir, entry, options = {}, &) # :yields: action, name, stats
     stats = {
       current: 0,
@@ -138,17 +147,34 @@ class Minitar::Input
     # `destdir`.
     #
     # However, squeeze consecutive '/' characters together.
-    full_name = entry.full_name.squeeze("/")
-
-    if /\.{2}(?:\/|\z)/.match?(full_name)
-      raise Minitar::SecureRelativePathError, "Path contains '..'"
-    end
+    full_name = secure_archive_path(entry.full_name)
+    hard_links = hard_link_extractor(destdir, options)
 
     if entry.directory?
+      hard_links&.add_directory(full_name)
       extract_directory(destdir, full_name, entry, stats, options, &)
+    elsif entry.hard_link?
+      unless hard_links
+        return extract_file(destdir, full_name, entry, stats, options, nil, &)
+      end
+
+      add_archive_hard_link(hard_links, full_name, entry, stats, &)
     else # it's a file
-      extract_file(destdir, full_name, entry, stats, options, &)
+      node = hard_links&.prepare_regular(full_name)
+      extract_file(destdir, full_name, entry, stats, options, hard_links, node, &)
     end
+  end
+
+  # Completes extraction of entries which depend on hard-link targets that appeared
+  # later in the archive. This is called automatically by Minitar.unpack when the
+  # `:hardlinks` option is enabled.
+  def finish_extraction(destdir, options = {})
+    return unless hard_links_enabled?(options)
+
+    extractor = @hard_link_extractors[destdir]
+    extractor&.finish
+  ensure
+    @hard_link_extractors.delete(destdir)
   end
 
   # Returns false if the wrapped data stream is open.
@@ -165,6 +191,36 @@ class Minitar::Input
 
   private
 
+  def hard_link_extractor(destdir, options)
+    return unless hard_links_enabled?(options)
+
+    @hard_link_extractors[destdir] ||= HardLinkExtractor.new(destdir)
+  end
+
+  def hard_links_enabled?(options)
+    options[:hardlinks] || options[:hard_links]
+  end
+
+  def add_archive_hard_link(hard_links, full_name, entry, stats, &block)
+    if block
+      hard_links.add_hard_link(full_name, entry.linkname) do
+        yield :hard_link, full_name, stats
+      end
+    else
+      hard_links.add_hard_link(full_name, entry.linkname)
+    end
+  end
+
+  def secure_archive_path(value)
+    full_name = value.to_s.squeeze("/")
+
+    if /\.{2}(?:\/|\z)/.match?(full_name)
+      raise Minitar::SecureRelativePathError, "Path contains '..'"
+    end
+
+    full_name
+  end
+
   def fsync_dir(dirname)
     # make sure this hits the disc
     dir = IO.open(dirname, "rb")
@@ -175,10 +231,10 @@ class Minitar::Input
     dir&.close rescue nil # standard:disable Style/RescueModifier
   end
 
-  def extract_directory(destdir, full_name, entry, stats, options)
+  def extract_directory(destdir, full_name, entry, stats, options, &block)
     dest = File.join(destdir, full_name)
 
-    yield :dir, full_name, stats if block_given?
+    block&.call(:dir, full_name, stats)
 
     if Minitar.dir?(dest)
       begin
@@ -199,13 +255,18 @@ class Minitar::Input
     end
   end
 
-  def extract_file(destdir, full_name, entry, stats, options)
+  def extract_file(destdir, full_name, entry, stats, options, hard_links = nil,
+    hard_link_node = nil)
     destdir = File.join(destdir, File.dirname(full_name))
-    FileUtils.mkdir_p(destdir, mode: 0o755)
+    FileUtils.mkdir_p(destdir, mode: 0o755) unless hard_links
 
     destfile = File.join(destdir, File.basename(full_name))
 
-    File.unlink(destfile) if File.symlink?(destfile)
+    if hard_links
+      File.unlink(destfile) if File.symlink?(destfile) || File.file?(destfile)
+    else
+      File.unlink(destfile) if File.symlink?(destfile)
+    end
 
     # Errno::ENOENT
     begin
@@ -243,5 +304,7 @@ class Minitar::Input
     end
 
     yield :file_done, full_name, stats if block_given?
+
+    hard_links.commit_regular(full_name, hard_link_node) if hard_links
   end
 end

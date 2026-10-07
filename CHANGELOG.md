@@ -8,6 +8,10 @@
     second parameter, `out_string`, where the data read from the stream will be
     read. [#166][pull-166]
 
+  - Added an explicit `hardlinks: true` extraction option to resolve tar hard-link
+    entries whose targets appear later in the archive. Cycles, missing targets, and
+    directory targets are reported after extracting the entries that completed.
+
 - Documentation:
 
   - Removed duplicate documentation files and updated the RDoc to match the

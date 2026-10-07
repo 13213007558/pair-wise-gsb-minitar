@@ -9,6 +9,7 @@ Rakefile
 SECURITY.md
 lib/minitar.rb
 lib/minitar/input.rb
+lib/minitar/input/hard_link_extractor.rb
 lib/minitar/output.rb
 lib/minitar/pax_header.rb
 lib/minitar/posix_header.rb

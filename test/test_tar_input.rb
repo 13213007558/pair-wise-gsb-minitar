@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest_helper"
+require "tmpdir"
 
 class TestTarInput < Minitest::Test
   TEST_CONTENTS = {
@@ -176,5 +177,222 @@ class TestTarInput < Minitest::Test
       outer += 1
     end
     assert_equal 6, outer
+  end
+
+  def test_hard_links_resolve_forward_and_indirectly
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :hard_link, name: "forward", target: "data"},
+      {type: :hard_link, name: "indirect", target: "forward"},
+      {type: :file, name: "data", content: "shared"},
+      {type: :file, name: "copy", content: "shared"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+      events = []
+      Minitar.unpack(StringIO.new(tar), dest, [], {hardlinks: true, fsync: false}) do |event, name|
+        events << [event, name]
+      end
+
+      assert_includes events, [:hard_link, "forward"]
+      assert_includes events, [:hard_link, "indirect"]
+
+      assert_equal "shared", File.read(File.join(dest, "data"))
+      assert_equal "shared", File.read(File.join(dest, "forward"))
+      assert_equal "shared", File.read(File.join(dest, "indirect"))
+      assert_equal "shared", File.read(File.join(dest, "copy"))
+
+      inodes = ["data", "forward", "indirect"].map do |name|
+        File.stat(File.join(dest, name)).ino
+      end
+      copy_inode = File.stat(File.join(dest, "copy")).ino
+
+      assert_equal [inodes.first] * 3, inodes
+      refute_equal inodes.first, copy_inode
+    end
+  end
+
+  def test_hard_links_keep_existing_group_when_path_is_later_replaced
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :file, name: "version", content: "old"},
+      {type: :hard_link, name: "old_link", target: "version"},
+      {type: :file, name: "version", content: "new"},
+      {type: :hard_link, name: "new_link", target: "version"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+      Minitar.unpack(StringIO.new(tar), dest, [], hardlinks: true, fsync: false)
+
+      assert_equal "old", File.read(File.join(dest, "old_link"))
+      assert_equal "new", File.read(File.join(dest, "version"))
+      assert_equal "new", File.read(File.join(dest, "new_link"))
+
+      old_inode = File.stat(File.join(dest, "old_link")).ino
+      current_inode = File.stat(File.join(dest, "version")).ino
+      new_link_inode = File.stat(File.join(dest, "new_link")).ino
+
+      refute_equal old_inode, current_inode
+      assert_equal current_inode, new_link_inode
+    end
+  end
+
+  def test_hard_link_cycle_is_reported
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :hard_link, name: "a", target: "b"},
+      {type: :hard_link, name: "b", target: "a"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+
+      assert_raises(Minitar::HardLinkCycle) do
+        Minitar.unpack(StringIO.new(tar), dest, [], hardlinks: true, fsync: false)
+      end
+
+      refute File.exist?(File.join(dest, "a"))
+      refute File.exist?(File.join(dest, "b"))
+    end
+  end
+
+  def test_missing_hard_link_target_is_reported_and_completed_files_remain
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :file, name: "completed", content: "kept"},
+      {type: :hard_link, name: "link", target: "missing"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+
+      assert_raises(Minitar::BrokenHardLink) do
+        Minitar.unpack(StringIO.new(tar), dest, [], hardlinks: true, fsync: false)
+      end
+
+      assert_equal "kept", File.read(File.join(dest, "completed"))
+      refute File.exist?(File.join(dest, "link"))
+    end
+  end
+
+  def test_hard_link_cannot_target_directory_indirectly
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :hard_link, name: "a", target: "b"},
+      {type: :hard_link, name: "b", target: "dir"},
+      {type: :dir, name: "dir"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+
+      assert_raises(Minitar::BrokenHardLink) do
+        Minitar.unpack(StringIO.new(tar), dest, [], hardlinks: true, fsync: false)
+      end
+
+      assert File.directory?(File.join(dest, "dir"))
+      refute File.exist?(File.join(dest, "a"))
+      refute File.exist?(File.join(dest, "b"))
+    end
+  end
+
+  def test_hard_link_does_not_use_preexisting_target_file
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :hard_link, name: "link", target: "existing"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+      FileUtils.mkdir_p(dest)
+      File.write(File.join(dest, "existing"), "outside archive")
+
+      assert_raises(Minitar::BrokenHardLink) do
+        Minitar.unpack(StringIO.new(tar), dest, [], hardlinks: true, fsync: false)
+      end
+
+      assert_equal "outside archive", File.read(File.join(dest, "existing"))
+      refute File.exist?(File.join(dest, "link"))
+    end
+  end
+
+  def test_hard_link_does_not_escape_through_preexisting_directory_symlink
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :hard_link, name: "sub/link", target: "sub/data"},
+      {type: :file, name: "sub/data", content: "inside archive"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+      outside = File.join(tmpdir, "outside")
+      FileUtils.mkdir_p(dest)
+      FileUtils.mkdir_p(outside)
+      File.symlink(File.expand_path(outside), File.join(dest, "sub"))
+
+      assert_raises(Minitar::SecureRelativePathError) do
+        Minitar.unpack(StringIO.new(tar), dest, [], hardlinks: true, fsync: false)
+      end
+
+      refute File.exist?(File.join(outside, "data"))
+      refute File.exist?(File.join(outside, "link"))
+    end
+  end
+
+  def test_hard_link_callbacks_are_not_emitted_for_missing_links
+    return if Minitar.windows?
+
+    tar = create_hardlink_tar([
+      {type: :hard_link, name: "link", target: "missing"}
+    ])
+
+    Dir.mktmpdir("hardlinks", ".tmp") do |tmpdir|
+      dest = File.join(tmpdir, "extract")
+      events = []
+
+      assert_raises(Minitar::BrokenHardLink) do
+        Minitar.unpack(StringIO.new(tar), dest, [], {hardlinks: true, fsync: false}) do |event, name|
+          events << [event, name]
+        end
+      end
+
+      refute_includes events, [:hard_link, "link"]
+    end
+  end
+
+  private
+
+  def create_hardlink_tar(entries)
+    StringIO.new("".b).tap do |io|
+      Minitar::Writer.open(io) do |writer|
+        entries.each do |entry|
+          case entry[:type]
+          when :file
+            writer.add_file_simple(entry[:name], data: entry[:content])
+          when :dir
+            writer.mkdir(entry[:name], mode: 0o755)
+          when :hard_link
+            header = Minitar::PosixHeader.new(
+              name: entry[:name],
+              prefix: "",
+              size: 0,
+              mode: 0o644,
+              typeflag: "1",
+              linkname: entry[:target]
+            )
+            io.write(header.to_s)
+          end
+        end
+      end
+    end.string
   end
 end

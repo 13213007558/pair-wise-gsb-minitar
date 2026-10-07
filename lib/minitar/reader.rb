@@ -105,6 +105,12 @@ class Minitar::Reader
     end
     alias_method :file, :file?
 
+    # Returns `true` if the entry represents a hard link.
+    def hard_link?
+      @typeflag == "1"
+    end
+    alias_method :hardlink, :hard_link?
+
     # Returns `true` if the current read pointer is at the end of the EntryStream data.
     def eof? = @read >= @size
 

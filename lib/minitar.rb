@@ -67,6 +67,12 @@ class Minitar
   SecureRelativePathError = Class.new(Error)
   # The exception raised when a file contains an invalid Posix header.
   InvalidTarStream = Class.new(Error)
+  # The exception raised when a hard link cannot be resolved during extraction.
+  HardLinkError = Class.new(Error)
+  # The exception raised when a hard link points to a missing or invalid target.
+  BrokenHardLink = Class.new(HardLinkError)
+  # The exception raised when hard links form a dependency cycle.
+  HardLinkCycle = Class.new(HardLinkError)
 end
 
 class << Minitar
@@ -259,6 +265,9 @@ class << Minitar
   # `dest`.
   #
   # If `files` is not empty, it will act as a full name filter to restrict extraction.
+  # Set `options[:hardlinks]` to `true` to resolve tar hard-link entries, including
+  # links whose targets appear later in the archive. Extraction is not transactional;
+  # entries completed before a hard-link error remain on disk.
   def unpack(src, dest, files = [], options = {}, &block)
     Minitar::Input.open(src) do |inp|
       if File.exist?(dest) && !dir?(dest)
@@ -272,6 +281,8 @@ class << Minitar
           inp.extract_entry(dest, entry, options, &block)
         end
       end
+
+      inp.finish_extraction(dest, options)
     end
   end
 
