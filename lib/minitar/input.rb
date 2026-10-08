@@ -217,14 +217,18 @@ class Minitar::Input
     yield :file_start, full_name, stats if block_given?
 
     File.open(destfile, "wb", entry.mode) do |os|
-      loop do
-        data = entry.read(4096)
-        break unless data
+      if entry.respond_to?(:sparse?) && entry.sparse?
+        extract_sparse_file(entry, os, full_name, stats)
+      else
+        loop do
+          data = entry.read(4096)
+          break unless data
 
-        stats[:currinc] = os.write(data)
-        stats[:current] += stats[:currinc]
+          stats[:currinc] = os.write(data)
+          stats[:current] += stats[:currinc]
 
-        yield :file_progress, full_name, stats if block_given?
+          yield :file_progress, full_name, stats if block_given?
+        end
       end
 
       if options.fetch(:fsync, true)
@@ -243,5 +247,31 @@ class Minitar::Input
     end
 
     yield :file_done, full_name, stats if block_given?
+  end
+
+  def extract_sparse_file(entry, os, full_name, stats)
+    entry.each_extent.each_with_index do |extent, index|
+      os.seek(extent.offset)
+      remaining = extent.length
+
+      while remaining.positive?
+        data =
+          if remaining == extent.length
+            entry.read_extent(index, [4096, remaining].min)
+          else
+            entry.read([4096, remaining].min)
+          end
+        raise Minitar::UnexpectedEOF if data.nil? || data.empty?
+
+        stats[:currinc] = os.write(data)
+        stats[:current] += stats[:currinc]
+        remaining -= stats[:currinc]
+
+        yield :file_progress, full_name, stats if block_given?
+      end
+    end
+
+    os.seek(entry.logical_size)
+    os.truncate(entry.logical_size)
   end
 end

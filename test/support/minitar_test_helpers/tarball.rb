@@ -14,8 +14,8 @@ module Minitar::TestHelpers::Tarball
     if path.empty?
       false
     else
-      version = `#{program} --version`.chomp
-      version =~ /\(GNU tar\)|Free Software Foundation/
+      version = Open3.capture3(path, "--version").first
+      version.start_with?("tar (GNU tar)")
     end
   }.freeze
 
@@ -82,7 +82,7 @@ module Minitar::TestHelpers::Tarball
   def roundtrip_tar_string(file_hash) =
     create_tar_string(file_hash).then { extract_tar_string(_1) }
 
-  def has_gnu_tar? = !GNU_TAR&.empty?
+  def has_gnu_tar? = !GNU_TAR.nil?
 
   Workspace = Struct.new(:tmpdir, :source, :target, :tarball, :files, keyword_init: true)
   private_constant :Workspace

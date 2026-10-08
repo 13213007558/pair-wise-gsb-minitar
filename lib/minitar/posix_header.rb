@@ -130,6 +130,7 @@ class Minitar::PosixHeader
         raise ArgumentError, "Invalid binary field format"
       end
     end
+
   end
 
   # Creates a new PosixHeader from a Hash. A PosixHeader cannot be created unless `name`,

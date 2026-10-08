@@ -133,6 +133,55 @@ class Minitar::Writer
     @io.write("\0" * remainder)
   end
 
+  # Adds a sparse regular file in GNU sparse format 1.0. +sparse_extents+ must
+  # be ordered by +:offset+, non-overlapping, and within +logical_size+. Each
+  # extent's source is supplied in +opts[:sources]+ or returned by the block.
+  #
+  # A source may be a String or a readable object. The sparse map starts on a
+  # 512-byte boundary and the complete entry body is block-padded, but trailing
+  # holes cost no archive data.
+  def add_file_sparse(name, logical_size, sparse_extents, opts = {})
+    raise Minitar::ClosedStream if @closed
+
+    extents = Minitar::SparseHeader.coerce_extents(sparse_extents)
+    sources = opts.fetch(:sources, nil)
+    raise ArgumentError, "No sparse data sources provided" if sources.nil? && !block_given?
+
+    header_fields = {
+      mode: opts.fetch(:mode, 0o644),
+      mtime: opts.fetch(:mtime, nil),
+      gid: opts.fetch(:gid, nil),
+      uid: opts.fetch(:uid, nil)
+    }
+
+    short_name, prefix, = split_name(name)
+    pax_block, header_block, map_data, = Minitar::SparseHeader.build(
+      header_fields.merge(name: short_name, prefix: prefix),
+      logical_size,
+      extents,
+      sparse_name: name
+    )
+
+    @io.write(pax_block)
+    @io.write(header_block)
+    @io.write(map_data)
+
+    extents.each_with_index do |extent, index|
+      source =
+        if block_given?
+          yield(extent, index)
+        else
+          sources[index]
+        end
+      write_sparse_source(source, extent.length)
+    end
+
+    data_bytes = map_data.bytesize + extents.sum(&:length)
+    @io.write("\0" * ((512 - (data_bytes % 512)) % 512))
+
+    nil
+  end
+
   # Adds a file to the archive as `name`. The data can be provided in `opts[:data]` or
   # provided to a yielded WriteOnlyStream. The size of the file will be determined from
   # the amount of data written to the stream.
@@ -244,19 +293,47 @@ class Minitar::Writer
 
   private
 
-  def write_header(header, long_name, short_name, prefix, needs_long_name)
-    if needs_long_name
-      long_name_header = {
-        prefix: "",
-        name: Minitar::PosixHeader::GNU_EXT_LONG_LINK,
-        typeflag: "L",
-        size: long_name.length + 1,
-        mode: 0
-      }
-      @io.write(Minitar::PosixHeader.new(long_name_header).to_s)
-      @io.write(long_name)
-      @io.write("\0" * (512 - (long_name.length % 512)))
+  def write_long_name(long_name, needs_long_name)
+    return unless needs_long_name
+
+    long_name_header = {
+      prefix: "",
+      name: Minitar::PosixHeader::GNU_EXT_LONG_LINK,
+      typeflag: "L",
+      size: long_name.length + 1,
+      mode: 0
+    }
+    @io.write(Minitar::PosixHeader.new(long_name_header).to_s)
+    @io.write(long_name)
+    @io.write("\0" * (512 - (long_name.length % 512)))
+  end
+
+  def write_sparse_source(source, length)
+    data =
+      if source.is_a?(String)
+        source
+      elsif source.respond_to?(:read)
+        read_exact(source, length)
+      else
+        raise ArgumentError, "sparse data source must be a String or readable object"
+      end
+
+    raise Minitar::UnexpectedEOF if data.bytesize != length
+    @io.write(data)
+  end
+
+  def read_exact(source, length)
+    data = +"".b
+    while data.bytesize < length
+      chunk = source.read(length - data.bytesize)
+      break if chunk.nil?
+      data << chunk
     end
+    data
+  end
+
+  def write_header(header, long_name, short_name, prefix, needs_long_name)
+    write_long_name(long_name, needs_long_name)
 
     new_header = header.merge({name: short_name, prefix: prefix})
     @io.write(Minitar::PosixHeader.new(new_header).to_s)
