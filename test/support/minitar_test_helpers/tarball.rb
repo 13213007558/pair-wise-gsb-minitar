@@ -82,7 +82,7 @@ module Minitar::TestHelpers::Tarball
   def roundtrip_tar_string(file_hash) =
     create_tar_string(file_hash).then { extract_tar_string(_1) }
 
-  def has_gnu_tar? = !GNU_TAR&.empty?
+  def has_gnu_tar? = !GNU_TAR.nil? && !GNU_TAR.empty?
 
   Workspace = Struct.new(:tmpdir, :source, :target, :tarball, :files, keyword_init: true)
   private_constant :Workspace

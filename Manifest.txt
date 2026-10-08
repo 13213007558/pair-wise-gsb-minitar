@@ -13,6 +13,7 @@ lib/minitar/output.rb
 lib/minitar/pax_header.rb
 lib/minitar/posix_header.rb
 lib/minitar/reader.rb
+lib/minitar/sparse.rb
 lib/minitar/version.rb
 lib/minitar/writer.rb
 licenses/bsdl.txt
@@ -42,4 +43,5 @@ test/test_tar_header.rb
 test/test_tar_input.rb
 test/test_tar_output.rb
 test/test_tar_reader.rb
+test/test_sparse.rb
 test/test_tar_writer.rb

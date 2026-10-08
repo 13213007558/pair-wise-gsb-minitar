@@ -199,7 +199,7 @@ class Minitar::Input
     end
   end
 
-  def extract_file(destdir, full_name, entry, stats, options)
+  def extract_file(destdir, full_name, entry, stats, options, &)
     destdir = File.join(destdir, File.dirname(full_name))
     FileUtils.mkdir_p(destdir, mode: 0o755)
 
@@ -217,14 +217,18 @@ class Minitar::Input
     yield :file_start, full_name, stats if block_given?
 
     File.open(destfile, "wb", entry.mode) do |os|
-      loop do
-        data = entry.read(4096)
-        break unless data
+      if entry.sparse?
+        extract_sparse_data(entry, os, full_name, stats, &)
+      else
+        loop do
+          data = entry.read(4096)
+          break unless data
 
-        stats[:currinc] = os.write(data)
-        stats[:current] += stats[:currinc]
+          stats[:currinc] = os.write(data)
+          stats[:current] += stats[:currinc]
 
-        yield :file_progress, full_name, stats if block_given?
+          yield :file_progress, full_name, stats if block_given?
+        end
       end
 
       if options.fetch(:fsync, true)
@@ -243,5 +247,40 @@ class Minitar::Input
     end
 
     yield :file_done, full_name, stats if block_given?
+  end
+
+  # Extracts a sparse entry by seeking to each extent's logical offset before
+  # writing its data, so that holes are created as real holes on filesystems
+  # that support sparse files. A trailing hole is preserved by truncating the
+  # file to its logical size.
+  def extract_sparse_data(entry, os, full_name, stats)
+    pos = 0
+
+    entry.each_extent do |extent|
+      hole = extent.offset - pos
+      while hole > 0
+        data = entry.read([hole, 4096].min)
+        raise Minitar::UnexpectedEOF unless data
+        hole -= data.bytesize
+      end
+
+      os.seek(extent.offset)
+
+      remaining = extent.length
+      while remaining > 0
+        data = entry.read([remaining, 4096].min)
+        raise Minitar::UnexpectedEOF unless data
+
+        stats[:currinc] = os.write(data)
+        stats[:current] += stats[:currinc]
+        remaining -= stats[:currinc]
+
+        yield :file_progress, full_name, stats if block_given?
+      end
+
+      pos = extent.offset + extent.length
+    end
+
+    os.truncate(entry.size)
   end
 end

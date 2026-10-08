@@ -67,6 +67,9 @@ class Minitar
   SecureRelativePathError = Class.new(Error)
   # The exception raised when a file contains an invalid Posix header.
   InvalidTarStream = Class.new(Error)
+  # The exception raised when an archive uses a sparse file format that is not
+  # supported. Only the GNU sparse 1.0 format is supported.
+  UnsupportedSparseFormat = Class.new(Error)
 end
 
 class << Minitar
@@ -292,6 +295,7 @@ end
 
 require "minitar/posix_header"
 require "minitar/pax_header"
+require "minitar/sparse"
 require "minitar/input"
 require "minitar/output"
 require "minitar/reader"

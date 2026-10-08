@@ -4,6 +4,13 @@
 
 - Enhancements:
 
+  - Added read and write support for the GNU sparse 1.0 format. Sparse entries
+    distinguish the logical file size, the list of non-empty extents, and the
+    amount of data actually stored in the archive. Extraction recreates holes
+    with seek on filesystems that support sparse files. Legacy GNU sparse
+    formats (0.0, 0.1, and the old GNU sparse typeflag) are rejected with
+    `Minitar::UnsupportedSparseFormat`.
+
   - Richard Degenne extended `Minitar::Reader::EntryStream#read` to accept a
     second parameter, `out_string`, where the data read from the stream will be
     read. [#166][pull-166]

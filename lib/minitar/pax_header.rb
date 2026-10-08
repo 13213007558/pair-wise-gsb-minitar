@@ -95,6 +95,29 @@ class Minitar::PaxHeader
   # The mtime value from PAX attributes
   def mtime = @attributes["mtime"]&.to_f
 
+  # Returns +true+ if the PAX attributes indicate a GNU sparse file of any
+  # version.
+  def sparse? =
+    @attributes.key?("GNU.sparse.major") || @attributes.key?("GNU.sparse.minor")
+
+  # Returns +true+ if the PAX attributes use the legacy GNU sparse 0.0 or 0.1
+  # formats, which are not supported.
+  def legacy_sparse? =
+    @attributes.key?("GNU.sparse.numblocks") || @attributes.key?("GNU.sparse.map")
+
+  # The GNU.sparse.major value from PAX attributes.
+  def sparse_major = @attributes["GNU.sparse.major"]
+
+  # The GNU.sparse.minor value from PAX attributes.
+  def sparse_minor = @attributes["GNU.sparse.minor"]
+
+  # The GNU.sparse.realsize value (the logical file size) from PAX attributes.
+  def sparse_realsize = @attributes["GNU.sparse.realsize"]&.to_i
+
+  # The GNU.sparse.name value (the true name of the sparse file) from PAX
+  # attributes.
+  def sparse_name = @attributes["GNU.sparse.name"]
+
   # Returns a string representation of the PAX header content.
   def to_s
     @attributes.map do |keyword, value|

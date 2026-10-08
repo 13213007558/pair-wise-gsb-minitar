@@ -226,6 +226,76 @@ class Minitar::Writer
     nil
   end
 
+  # Adds a sparse file to the archive as +name+, using the GNU sparse 1.0
+  # format. Only the non-empty extents of the file are stored in the archive;
+  # the holes between them are reconstructed as zero bytes when the archive is
+  # read.
+  #
+  # Valid parameters to +opts+ are:
+  #
+  # - +:size+ (_required_): The logical size of the file in bytes, including
+  #   holes. The logical size may be larger than the end of the last extent;
+  #   such a trailing hole is preserved.
+  # - +:extents+ (_required_): The non-empty extents of the file, in file
+  #   offset order. Each extent is a Hash with +:offset+, +:length+, and
+  #   +:data+ keys, or a three-element array of +[offset, length, data]+. The
+  #   +:data+ value is the data source for the extent: a String of exactly
+  #   +:length+ bytes, or an IO-like object that exactly +:length+ bytes are
+  #   read from.
+  # - +:mode+: The Unix file permissions mode value. If not provided, defaults
+  #   to +0o644+.
+  # - +:uid+: The Unix file owner user ID number.
+  # - +:gid+: The Unix file owner group ID number.
+  # - +:mtime+: File modification time, interpreted as an integer.
+  #
+  # An exception will be raised if the extents overlap, are out of order, or
+  # exceed the logical size, or if a data source provides fewer bytes than its
+  # extent declares.
+  def add_file_sparse(name, opts = {})
+    raise Minitar::ClosedStream if @closed
+
+    logical_size = opts.fetch(:size, nil)
+    unless logical_size.is_a?(Integer) && logical_size >= 0
+      raise ArgumentError, "A non-negative logical size is required"
+    end
+
+    extent_specs = opts.fetch(:extents, nil)
+    raise ArgumentError, "No extents provided" unless extent_specs
+
+    entries = extent_specs.map { |spec| normalize_sparse_extent(spec) }
+    extents = entries.map(&:first)
+
+    Minitar::Sparse.validate_extents!(extents, logical_size)
+
+    map = Minitar::Sparse.encode_map(extents)
+    map_padded = map.ljust(Minitar::Sparse.map_block_count(extents) * 512, "\0")
+
+    data_size = extents.sum(&:length)
+    body_size = map_padded.bytesize + data_size
+
+    write_sparse_pax_header(name, logical_size)
+
+    header = {
+      mode: opts.fetch(:mode, 0o644),
+      mtime: opts.fetch(:mtime, nil),
+      gid: opts.fetch(:gid, nil),
+      uid: opts.fetch(:uid, nil),
+      size: body_size
+    }
+
+    short_name, prefix, needs_long_name = split_name(name)
+    write_header(header, name, short_name, prefix, needs_long_name)
+
+    @io.write(map_padded)
+
+    entries.each do |extent, source|
+      write_sparse_extent_data(source, extent.length)
+    end
+
+    remainder = (512 - (body_size % 512)) % 512
+    @io.write("\0" * remainder)
+  end
+
   # Passes the #flush method to the wrapped stream, used for buffered streams.
   def flush
     raise Minitar::ClosedStream if @closed
@@ -243,6 +313,72 @@ class Minitar::Writer
   end
 
   private
+
+  def normalize_sparse_extent(spec)
+    offset, length, source =
+      if spec.is_a?(Array)
+        spec
+      else
+        [spec[:offset], spec[:length], spec[:data]]
+      end
+
+    unless offset.is_a?(Integer) && length.is_a?(Integer)
+      raise ArgumentError, "Sparse extent offset and length must be integers"
+    end
+
+    raise ArgumentError, "Sparse extent requires a data source" if source.nil?
+
+    [Minitar::Sparse::Extent.new(offset, length), source]
+  end
+
+  def write_sparse_pax_header(name, logical_size)
+    pax = Minitar::PaxHeader.new(
+      "GNU.sparse.major" => Minitar::Sparse::MAJOR,
+      "GNU.sparse.minor" => Minitar::Sparse::MINOR,
+      "GNU.sparse.name" => name,
+      "GNU.sparse.realsize" => logical_size
+    )
+    data = pax.to_s
+
+    pax_name = "PaxHeader/#{name}"
+    pax_name = pax_name.byteslice(0, 100) if pax_name.bytesize > 100
+
+    header = Minitar::PosixHeader.new(
+      name: pax_name,
+      prefix: "",
+      typeflag: "x",
+      size: data.bytesize,
+      mode: 0
+    )
+    @io.write(header.to_s)
+    @io.write(data)
+    @io.write("\0" * ((512 - (data.bytesize % 512)) % 512))
+  end
+
+  def write_sparse_extent_data(source, length)
+    if source.is_a?(String)
+      if source.bytesize < length
+        raise Minitar::UnexpectedEOF,
+          "Sparse extent data is shorter than its declared length"
+      end
+      if source.bytesize > length
+        raise ArgumentError,
+          "Sparse extent data is longer than its declared length"
+      end
+      @io.write(source)
+    else
+      remaining = length
+      while remaining > 0
+        chunk = source.read([remaining, 4096].min)
+        if chunk.nil? || chunk.bytesize == 0
+          raise Minitar::UnexpectedEOF,
+            "Sparse extent data source ended before its declared length"
+        end
+        @io.write(chunk)
+        remaining -= chunk.bytesize
+      end
+    end
+  end
 
   def write_header(header, long_name, short_name, prefix, needs_long_name)
     if needs_long_name
